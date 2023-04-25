@@ -70,7 +70,7 @@ Use [pkg.go.dev](https://pkg.go.dev/encoding/json) website, or read [the blog po
 | :---: |
 | ![medium.png](./medium.png) | 
 
-| [Large Payload](https://github.com/goccy/go-json/blob/master/benchmarks/large_payload.go#L153) | [Small Payload](https://github.com/goccy/go-json/blob/master/benchmarks/small_payload.go#L5) |
+| [Small Payload](https://github.com/goccy/go-json/blob/master/benchmarks/small_payload.go#L5) | [Large Payload](https://github.com/goccy/go-json/blob/master/benchmarks/large_payload.go#L153) |
 | :---: | :---: |
 | ![small.png](./small.png) | ![large.png](./large.png) |
 
