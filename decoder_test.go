@@ -7,7 +7,6 @@ package sonnet
 import (
 	"bytes"
 	"encoding"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -19,8 +18,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sugawarayuuta/sonnet/internal/compat"
 )
 
 type T struct {
@@ -60,7 +57,7 @@ type PP struct {
 type SS string
 
 func (*SS) UnmarshalJSON(data []byte) error {
-	return compat.NewUnmarshalTypeError('2', reflect.TypeOf(SS("")), 0)
+	return &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(SS(""))}
 }
 
 // ifaceNumAsFloat64/ifaceNumAsNumber are used to test unmarshaling with and
@@ -87,17 +84,17 @@ type u8 uint8
 
 // A type that can unmarshal itself.
 
-type unmarshaler struct {
+type customUnmarshaler struct {
 	T bool
 }
 
-func (u *unmarshaler) UnmarshalJSON(b []byte) error {
-	*u = unmarshaler{true} // All we need to see that UnmarshalJSON is called.
+func (u *customUnmarshaler) UnmarshalJSON(b []byte) error {
+	*u = customUnmarshaler{true} // All we need to see that UnmarshalJSON is called.
 	return nil
 }
 
 type ustruct struct {
-	M unmarshaler
+	M customUnmarshaler
 }
 
 type unmarshalerText struct {
@@ -148,9 +145,9 @@ func (u8 *u8marshal) UnmarshalText(b []byte) error {
 var _ encoding.TextUnmarshaler = (*u8marshal)(nil)
 
 var (
-	umtrue   = unmarshaler{true}
-	umslice  = []unmarshaler{{true}}
-	umstruct = ustruct{unmarshaler{true}}
+	umtrue   = customUnmarshaler{true}
+	umslice  = []customUnmarshaler{{true}}
+	umstruct = ustruct{customUnmarshaler{true}}
 
 	umtrueXY   = unmarshalerText{"x", "y"}
 	umsliceXY  = []unmarshalerText{{"x", "y"}}
@@ -424,11 +421,11 @@ var unmarshalTests = []unmarshalTest{
 	{in: `"g-clef: \uD834\uDD1E"`, ptr: new(string), out: "g-clef: \U0001D11E"},
 	{in: `"invalid: \uD834x\uDD1E"`, ptr: new(string), out: "invalid: \uFFFDx\uFFFD"},
 	{in: "null", ptr: new(any), out: nil},
-	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{Value: "array", Type: reflect.TypeOf(""), Offset: 7, Struct: "T", Field: "X"}},
-	{in: `{"X": 23}`, ptr: new(T), out: T{}, err: &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(""), Offset: 8, Struct: "T", Field: "X"}}, {in: `{"x": 1}`, ptr: new(tx), out: tx{}},
+	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{"array", reflect.TypeOf(""), 7, "T", "X"}},
+	{in: `{"X": 23}`, ptr: new(T), out: T{}, err: &UnmarshalTypeError{"number", reflect.TypeOf(""), 8, "T", "X"}}, {in: `{"x": 1}`, ptr: new(tx), out: tx{}},
 	{in: `{"x": 1}`, ptr: new(tx), out: tx{}},
 	{in: `{"x": 1}`, ptr: new(tx), err: fmt.Errorf("sonnet: unknown field \"x\""), disallowUnknownFields: true},
-	{in: `{"S": 23}`, ptr: new(W), out: W{}, err: &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(SS("")), Offset: 0, Struct: "W", Field: "S"}},
+	{in: `{"S": 23}`, ptr: new(W), out: W{}, err: &UnmarshalTypeError{"number", reflect.TypeOf(SS("")), 0, "W", "S"}},
 	{in: `{"F1":1,"F2":2,"F3":3}`, ptr: new(V), out: V{F1: float64(1), F2: int32(2), F3: Number("3")}},
 	{in: `{"F1":1,"F2":2,"F3":3}`, ptr: new(V), out: V{F1: Number("1"), F2: int32(2), F3: Number("3")}, useNumber: true},
 	{in: `{"k1":1,"k2":"s","k3":[1,2.0,3e-3],"k4":{"kk1":"s","kk2":2}}`, ptr: new(any), out: ifaceNumAsFloat64},
@@ -452,21 +449,21 @@ var unmarshalTests = []unmarshalTest{
 	{in: `{"alphabet": "xyz"}`, ptr: new(U), err: fmt.Errorf("sonnet: unknown field \"alphabet\""), disallowUnknownFields: true},
 
 	// syntax errors
-	{in: `{"X": "foo", "Y"}`, err: compat.NewSyntaxError("invalid character '}' after object key", 17)},
-	{in: `[1, 2, 3+]`, err: compat.NewSyntaxError("invalid character '+' after array element", 9)},
-	{in: `{"X":12x}`, err: compat.NewSyntaxError("invalid character 'x' after object key:value pair", 8), useNumber: true},
-	{in: `[2, 3`, err: compat.NewSyntaxError("unexpected end of JSON input", 5)},
-	{in: `{"F3": -}`, ptr: new(V), out: V{F3: Number("-")}, err: compat.NewSyntaxError("invalid character '}' in numeric literal", 9)},
+	{in: `{"X": "foo", "Y"}`, err: &SyntaxError{"invalid character '}' after object key", 17}},
+	{in: `[1, 2, 3+]`, err: &SyntaxError{"invalid character '+' after array element", 9}},
+	{in: `{"X":12x}`, err: &SyntaxError{"invalid character 'x' after object key:value pair", 8}, useNumber: true},
+	{in: `[2, 3`, err: &SyntaxError{msg: "unexpected end of JSON input", Offset: 5}},
+	{in: `{"F3": -}`, ptr: new(V), out: V{F3: Number("-")}, err: &SyntaxError{msg: "invalid character '}' in numeric literal", Offset: 9}},
 
 	// raw value errors
-	{in: "\x01 42", err: compat.NewSyntaxError("invalid character '\\x01' looking for beginning of value", 1)},
-	{in: " 42 \x01", err: compat.NewSyntaxError("invalid character '\\x01' after top-level value", 5)},
-	{in: "\x01 true", err: compat.NewSyntaxError("invalid character '\\x01' looking for beginning of value", 1)},
-	{in: " false \x01", err: compat.NewSyntaxError("invalid character '\\x01' after top-level value", 8)},
-	{in: "\x01 1.2", err: compat.NewSyntaxError("invalid character '\\x01' looking for beginning of value", 1)},
-	{in: " 3.4 \x01", err: compat.NewSyntaxError("invalid character '\\x01' after top-level value", 6)},
-	{in: "\x01 \"string\"", err: compat.NewSyntaxError("invalid character '\\x01' looking for beginning of value", 1)},
-	{in: " \"string\" \x01", err: compat.NewSyntaxError("invalid character '\\x01' after top-level value", 11)},
+	{in: "\x01 42", err: &SyntaxError{"invalid character '\\x01' looking for beginning of value", 1}},
+	{in: " 42 \x01", err: &SyntaxError{"invalid character '\\x01' after top-level value", 5}},
+	{in: "\x01 true", err: &SyntaxError{"invalid character '\\x01' looking for beginning of value", 1}},
+	{in: " false \x01", err: &SyntaxError{"invalid character '\\x01' after top-level value", 8}},
+	{in: "\x01 1.2", err: &SyntaxError{"invalid character '\\x01' looking for beginning of value", 1}},
+	{in: " 3.4 \x01", err: &SyntaxError{"invalid character '\\x01' after top-level value", 6}},
+	{in: "\x01 \"string\"", err: &SyntaxError{"invalid character '\\x01' looking for beginning of value", 1}},
+	{in: " \"string\" \x01", err: &SyntaxError{"invalid character '\\x01' after top-level value", 11}},
 
 	// array tests
 	{in: `[1, 2, 3]`, ptr: new([3]int), out: [3]int{1, 2, 3}},
@@ -491,10 +488,10 @@ var unmarshalTests = []unmarshalTest{
 	{in: pallValueCompact, ptr: new(*All), out: &pallValue},
 
 	// unmarshal interface test
-	{in: `{"T":false}`, ptr: new(unmarshaler), out: umtrue}, // use "false" so test will fail if custom unmarshaler is not called
-	{in: `{"T":false}`, ptr: new(*unmarshaler), out: &umtrue},
-	{in: `[{"T":false}]`, ptr: new([]unmarshaler), out: umslice},
-	{in: `[{"T":false}]`, ptr: new(*[]unmarshaler), out: &umslice},
+	{in: `{"T":false}`, ptr: new(customUnmarshaler), out: umtrue}, // use "false" so test will fail if custom customUnmarshaler is not called
+	{in: `{"T":false}`, ptr: new(*customUnmarshaler), out: &umtrue},
+	{in: `[{"T":false}]`, ptr: new([]customUnmarshaler), out: umslice},
+	{in: `[{"T":false}]`, ptr: new(*[]customUnmarshaler), out: &umslice},
 	{in: `{"M":{"T":"x:y"}}`, ptr: new(ustruct), out: umstruct},
 
 	// UnmarshalText interface test
@@ -548,32 +545,32 @@ var unmarshalTests = []unmarshalTest{
 	{
 		in:  `{"abc":"abc"}`,
 		ptr: new(map[int]string),
-		err: compat.NewUnmarshalTypeError('"', reflect.TypeOf(int(0)), 2),
+		err: &UnmarshalTypeError{Value: "number abc", Type: reflect.TypeOf(0), Offset: 2},
 	},
 	{
 		in:  `{"256":"abc"}`,
 		ptr: new(map[uint8]string),
-		err: compat.NewUnmarshalTypeError('2', reflect.TypeOf(uint8(0)), 2),
+		err: &UnmarshalTypeError{Value: "number 256", Type: reflect.TypeOf(uint8(0)), Offset: 2},
 	},
 	{
 		in:  `{"128":"abc"}`,
 		ptr: new(map[int8]string),
-		err: compat.NewUnmarshalTypeError('1', reflect.TypeOf(int8(0)), 2),
+		err: &UnmarshalTypeError{Value: "number 128", Type: reflect.TypeOf(int8(0)), Offset: 2},
 	},
 	{
 		in:  `{"-1":"abc"}`,
 		ptr: new(map[uint8]string),
-		err: compat.NewUnmarshalTypeError('-', reflect.TypeOf(uint8(0)), 2),
+		err: &UnmarshalTypeError{Value: "number -1", Type: reflect.TypeOf(uint8(0)), Offset: 2},
 	},
 	{
 		in:  `{"F":{"a":2,"3":4}}`,
 		ptr: new(map[string]map[int]int),
-		err: compat.NewUnmarshalTypeError('"', reflect.TypeOf(int(0)), 7),
+		err: &UnmarshalTypeError{Value: "number a", Type: reflect.TypeOf(int(0)), Offset: 7},
 	},
 	{
 		in:  `{"F":{"a":2,"3":4}}`,
 		ptr: new(map[string]map[uint]int),
-		err: compat.NewUnmarshalTypeError('"', reflect.TypeOf(uint(0)), 7),
+		err: &UnmarshalTypeError{Value: "number a", Type: reflect.TypeOf(uint(0)), Offset: 7},
 	},
 
 	// Map keys can be encoding.TextUnmarshalers.
@@ -722,8 +719,8 @@ var unmarshalTests = []unmarshalTest{
 	},
 	{
 		in:  `{"asdf": "hello world"}`,
-		ptr: new(map[unmarshaler]string),
-		err: &UnmarshalTypeError{Value: "object", Type: reflect.TypeOf(map[unmarshaler]string{}), Offset: 1},
+		ptr: new(map[customUnmarshaler]string),
+		err: &UnmarshalTypeError{Value: "object", Type: reflect.TypeOf(map[customUnmarshaler]string{}), Offset: 1},
 	},
 
 	// related to issue 13783.
@@ -819,12 +816,24 @@ var unmarshalTests = []unmarshalTest{
 	{
 		in:  `{"V": {"F2": "hello"}}`,
 		ptr: new(VOuter),
-		err: compat.NewUnmarshalTypeError('"', reflect.TypeOf(int32(0)), 20),
+		err: &UnmarshalTypeError{
+			Value:  "string",
+			Struct: "V",
+			Field:  "V.F2",
+			Type:   reflect.TypeOf(int32(0)),
+			Offset: 20,
+		},
 	},
 	{
 		in:  `{"V": {"F4": {}, "F2": "hello"}}`,
 		ptr: new(VOuter),
-		err: compat.NewUnmarshalTypeError('"', reflect.TypeOf(int32(0)), 30),
+		err: &UnmarshalTypeError{
+			Value:  "string",
+			Struct: "V",
+			Field:  "V.F2",
+			Type:   reflect.TypeOf(int32(0)),
+			Offset: 30,
+		},
 	},
 
 	// issue 15146.
@@ -898,41 +907,56 @@ var unmarshalTests = []unmarshalTest{
 	{
 		in:  `{"data":{"test1": "bob", "test2": 123}}`,
 		ptr: new(mapStringToStringData),
-		err: compat.NewUnmarshalTypeError('1', reflect.TypeOf(""), 37),
+		err: &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(""), Offset: 37, Struct: "mapStringToStringData", Field: "data"},
 	},
 	{
 		in:  `{"data":{"test1": 123, "test2": "bob"}}`,
 		ptr: new(mapStringToStringData),
-		err: compat.NewUnmarshalTypeError('1', reflect.TypeOf(""), 21),
+		err: &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(""), Offset: 21, Struct: "mapStringToStringData", Field: "data"},
 	},
 
 	// trying to decode JSON arrays or objects via TextUnmarshaler
 	{
 		in:  `[1, 2, 3]`,
 		ptr: new(MustNotUnmarshalText),
-		err: compat.NewUnmarshalTypeError('[', reflect.TypeOf(&MustNotUnmarshalText{}), 1),
+		err: &UnmarshalTypeError{Value: "array", Type: reflect.TypeOf(&MustNotUnmarshalText{}), Offset: 1},
 	},
 	{
 		in:  `{"foo": "bar"}`,
 		ptr: new(MustNotUnmarshalText),
-		err: compat.NewUnmarshalTypeError('{', reflect.TypeOf(&MustNotUnmarshalText{}), 1),
+		err: &UnmarshalTypeError{Value: "object", Type: reflect.TypeOf(&MustNotUnmarshalText{}), Offset: 1},
 	},
 	// #22369
 	{
 		in:  `{"PP": {"T": {"Y": "bad-type"}}}`,
 		ptr: new(P),
-		err: compat.NewUnmarshalTypeError('"', reflect.TypeOf(int(0)), 29),
+		err: &UnmarshalTypeError{
+			Value:  "string",
+			Struct: "T",
+			Field:  "PP.T.Y",
+			Type:   reflect.TypeOf(int(0)),
+			Offset: 29,
+		},
 	},
 	{
 		in:  `{"Ts": [{"Y": 1}, {"Y": 2}, {"Y": "bad-type"}]}`,
 		ptr: new(PP),
-		err: compat.NewUnmarshalTypeError('"', reflect.TypeOf(int(0)), 29),
+		err: &UnmarshalTypeError{
+			Value:  "string",
+			Struct: "T",
+			Field:  "Ts.Y",
+			Type:   reflect.TypeOf(int(0)),
+			Offset: 29,
+		},
 	},
 	// #14702
 	{
 		in:  `invalid`,
 		ptr: new(Number),
-		err: compat.NewSyntaxError("invalid character 'i' looking for beginning of value", 1),
+		err: &SyntaxError{
+			msg:    "invalid character 'i' looking for beginning of value",
+			Offset: 1,
+		},
 	},
 	{
 		in:  `"invalid"`,
@@ -949,7 +973,7 @@ var unmarshalTests = []unmarshalTest{
 		ptr: new(struct {
 			A Number `json:",string"`
 		}),
-		err: fmt.Errorf("sonnet: invalid use of ,string struct tag, trying to unmarshal %q into json.Number", `invalid`),
+		err: fmt.Errorf("sonnet: invalid use of ,string struct tag, trying to unmarshal %q into sonnet.Number", `invalid`),
 	},
 	{
 		in:  `{"A":"invalid"}`,
@@ -959,7 +983,6 @@ var unmarshalTests = []unmarshalTest{
 }
 
 func TestMarshal(t *testing.T) {
-	// b, err := json.Marshal(allValue)
 	b, err := Marshal(allValue)
 	if err != nil {
 		t.Fatalf("Marshal allValue: %v", err)
@@ -970,7 +993,6 @@ func TestMarshal(t *testing.T) {
 		return
 	}
 
-	// b, err = json.Marshal(pallValue)
 	b, err = Marshal(pallValue)
 	if err != nil {
 		t.Fatalf("Marshal pallValue: %v", err)
@@ -1004,7 +1026,6 @@ func TestMarshalBadUTF8(t *testing.T) {
 
 func TestMarshalNumberZeroVal(t *testing.T) {
 	var n Number
-	// out, err := json.Marshal(n)
 	out, err := Marshal(n)
 	if err != nil {
 		t.Fatal(err)
@@ -1047,7 +1068,6 @@ func TestMarshalEmbeds(t *testing.T) {
 			Q: 18,
 		},
 	}
-	// b, err := json.Marshal(top)
 	b, err := Marshal(top)
 	if err != nil {
 		t.Fatal(err)
@@ -1070,18 +1090,7 @@ func equalError(a, b error) bool {
 
 func TestUnmarshal(t *testing.T) {
 	for i, tt := range unmarshalTests {
-		if tt.err != nil {
-			// TODO: do not skip tests for illegal behavior
-			continue
-		}
-		// var scan scanner
 		in := []byte(tt.in)
-		// if err := checkValid(in, &scan); err != nil {
-		// 	if !equalError(err, tt.err) {
-		// 		t.Errorf("#%d: checkValid: %#v", i, err)
-		// 		continue
-		// 	}
-		// }
 		if tt.ptr == nil {
 			continue
 		}
@@ -1122,12 +1131,16 @@ func TestUnmarshal(t *testing.T) {
 		}
 		if !reflect.DeepEqual(v.Elem().Interface(), tt.out) {
 			t.Errorf("#%d: mismatch\nhave: %#+v\nwant: %#+v", i, v.Elem().Interface(), tt.out)
+			data, _ := Marshal(v.Elem().Interface())
+			println(string(data))
+			data, _ = Marshal(tt.out)
+			println(string(data))
 			continue
 		}
 
 		// Check round trip also decodes correctly.
 		if tt.err == nil {
-			enc, err := json.Marshal(v.Interface())
+			enc, err := Marshal(v.Interface())
 			if err != nil {
 				t.Errorf("#%d: error re-marshaling: %v", i, err)
 				continue
@@ -1160,7 +1173,7 @@ func TestUnmarshalMarshal(t *testing.T) {
 	if err := Unmarshal(jsonBig, &v); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	b, err := json.Marshal(v)
+	b, err := Marshal(v)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -1208,7 +1221,7 @@ func TestLargeByteSlice(t *testing.T) {
 	for i := range s0 {
 		s0[i] = byte(i)
 	}
-	b, err := json.Marshal(s0)
+	b, err := Marshal(s0)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -1251,7 +1264,6 @@ func TestUnmarshalPtrPtr(t *testing.T) {
 func TestEscape(t *testing.T) {
 	const input = `"foobar"<html>` + " [\u2028 \u2029]"
 	const expected = `"\"foobar\"\u003chtml\u003e [\u2028 \u2029]"`
-	// b, err := json.Marshal(input)
 	b, err := Marshal(input)
 	if err != nil {
 		t.Fatalf("Marshal error: %v", err)
@@ -1270,15 +1282,13 @@ type wrongStringTest struct {
 	in, err string
 }
 
-// changes have been made to achieve both clarity and ease of implementation.
-// TODO?: remake it to give it similar error messages
 var wrongStringTests = []wrongStringTest{
-	{`{"result":"x"}`, `sonnet: cannot unmarshal x (head): unknown into Go value of type string`},
-	{`{"result":"foo"}`, `sonnet: cannot unmarshal f (head): "false"? into Go value of type string`},
-	{`{"result":"123"}`, `sonnet: cannot unmarshal 1 (head): number? into Go value of type string`},
-	{`{"result":123}`, `sonnet: invalid use of ,string option`},
-	{`{"result":"\""}`, `sonnet: string literal not terminated`},
-	{`{"result":"\"foo"}`, `sonnet: string literal not terminated`},
+	{`{"result":"x"}`, `sonnet: invalid use of ,string struct tag, trying to unmarshal "x" into string`},
+	{`{"result":"foo"}`, `sonnet: invalid use of ,string struct tag, trying to unmarshal "foo" into string`},
+	{`{"result":"123"}`, `sonnet: invalid use of ,string struct tag, trying to unmarshal "123" into string`},
+	{`{"result":123}`, `sonnet: invalid use of ,string struct tag, trying to unmarshal unquoted value into string`},
+	{`{"result":"\""}`, `sonnet: invalid use of ,string struct tag, trying to unmarshal "\"" into string`},
+	{`{"result":"\"foo"}`, `sonnet: invalid use of ,string struct tag, trying to unmarshal "\"foo" into string`},
 }
 
 // If people misuse the ,string modifier, the error message should be
@@ -1295,15 +1305,15 @@ func TestErrorMessageFromMisusedString(t *testing.T) {
 	}
 }
 
-func isSpace(c byte) bool {
-	return c <= ' ' && (c == ' ' || c == '\t' || c == '\r' || c == '\n')
-}
-
 func noSpace(c rune) rune {
 	if isSpace(byte(c)) { //only used for ascii
 		return -1
 	}
 	return c
+}
+
+func isSpace(char byte) bool {
+	return char == ' ' || char == '\n' || char == '\t' || char == '\r'
 }
 
 type All struct {
@@ -1917,7 +1927,7 @@ func TestStringKind(t *testing.T) {
 		"foo": 42,
 	}
 
-	data, err := json.Marshal(m1)
+	data, err := Marshal(m1)
 	if err != nil {
 		t.Errorf("Unexpected error marshaling: %v", err)
 	}
@@ -1940,7 +1950,7 @@ func TestByteKind(t *testing.T) {
 
 	a := byteKind("hello")
 
-	data, err := json.Marshal(a)
+	data, err := Marshal(a)
 	if err != nil {
 		t.Error(err)
 	}
@@ -1961,7 +1971,7 @@ func TestSliceOfCustomByte(t *testing.T) {
 
 	a := []Uint8("hello")
 
-	data, err := json.Marshal(a)
+	data, err := Marshal(a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2166,7 +2176,7 @@ var invalidUnmarshalTextTests = []struct {
 	{nil, "sonnet: Unmarshal(nil)"},
 	{struct{}{}, "sonnet: Unmarshal(non-pointer struct {})"},
 	{(*int)(nil), "sonnet: Unmarshal(nil *int)"},
-	{new(net.IP), "sonnet: cannot unmarshal 1 (head): number? into Go value of type net.IP"},
+	{new(net.IP), "sonnet: cannot unmarshal number into Go value of type *net.IP"},
 }
 
 func TestInvalidUnmarshalText(t *testing.T) {
@@ -2196,7 +2206,7 @@ func TestInvalidStringOption(t *testing.T) {
 		P *int              `json:",string"`
 	}{M: make(map[string]string), S: make([]string, 0), I: num, P: &num}
 
-	data, err := json.Marshal(item)
+	data, err := Marshal(item)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -2290,10 +2300,7 @@ func TestUnmarshalEmbeddedUnexported(t *testing.T) {
 		out: new(S4),
 	}, {
 		// Error since we cannot set S5.embed1, but still able to set S5.R.
-		// WARN: modified so that it uses ,string option properly.
-		// before-after is in below comments.
-		// in:  `{"R":2,"Q":1}`,
-		in:  `{"R":2,"Q":"1"}`,
+		in:  `{"R":2,"Q":1}`,
 		ptr: new(S5),
 		out: &S5{R: 2},
 		err: fmt.Errorf("sonnet: cannot set embedded pointer to unexported struct: sonnet.embed3"),
@@ -2342,26 +2349,24 @@ func TestUnmarshalEmbeddedUnexported(t *testing.T) {
 }
 
 func TestUnmarshalErrorAfterMultipleJSON(t *testing.T) {
-	// changes have been made to achieve both clarity and ease of implementation.
-	// TODO?: remake it to give it similar error messages
 	tests := []struct {
 		in  string
 		err error
 	}{{
 		in:  `1 false null :`,
-		err: compat.NewSyntaxError(`unhandled token: ":"`, 14),
+		err: &SyntaxError{"invalid character ':' looking for beginning of value", 14},
 	}, {
 		in:  `1 [] [,]`,
-		err: compat.NewSyntaxError(`unhandled token: ","`, 7),
+		err: &SyntaxError{"invalid character ',' looking for beginning of value", 7},
 	}, {
 		in:  `1 [] [true:]`,
-		err: compat.NewSyntaxError(`expected a comma or a closing ], got: ":"`, 11),
+		err: &SyntaxError{"invalid character ':' after array element", 11},
 	}, {
 		in:  `1  {}    {"x"=}`,
-		err: compat.NewSyntaxError(`expected a colon, got: "="`, 14),
+		err: &SyntaxError{"invalid character '=' after object key", 14},
 	}, {
 		in:  `falsetruenul#`,
-		err: compat.NewSyntaxError(`expected null, got: nul#`, 13),
+		err: &SyntaxError{"invalid character '#' in literal null (expecting 'l')", 13},
 	}}
 	for i, tt := range tests {
 		dec := NewDecoder(strings.NewReader(tt.in))
@@ -2440,11 +2445,10 @@ func TestUnmarshalRescanLiteralMangledUnquote(t *testing.T) {
 	}
 	t1 := T{"aaa\tbbb"}
 
-	b, err := json.Marshal(t1)
+	b, err := Marshal(t1)
 	if err != nil {
 		t.Fatalf("Marshal unexpected error: %v", err)
 	}
-
 	var t2 T
 	if err := Unmarshal(b, &t2); err != nil {
 		t.Fatalf("Unmarshal unexpected error: %v", err)
@@ -2456,7 +2460,7 @@ func TestUnmarshalRescanLiteralMangledUnquote(t *testing.T) {
 	// See golang.org/issues/39555.
 	input := map[textUnmarshalerString]string{"FOO": "", `"`: ""}
 
-	encoded, err := json.Marshal(input)
+	encoded, err := Marshal(input)
 	if err != nil {
 		t.Fatalf("Marshal unexpected error: %v", err)
 	}
@@ -2538,9 +2542,9 @@ func TestUnmarshalMaxDepth(t *testing.T) {
 			},
 		},
 		{
-			name: "custom unmarshaler",
+			name: "custom customUnmarshaler",
 			newValue: func() any {
-				v := unmarshaler{}
+				v := customUnmarshaler{}
 				return &v
 			},
 		},

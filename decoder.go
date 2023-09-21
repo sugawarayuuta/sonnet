@@ -2,32 +2,123 @@ package sonnet
 
 import (
 	"bytes"
+	"encoding"
+	"errors"
+	"github.com/sugawarayuuta/sonnet/internal/mem"
 	"io"
-
-	"github.com/sugawarayuuta/sonnet/internal/decoder"
-	"github.com/sugawarayuuta/sonnet/internal/pool"
-	"github.com/sugawarayuuta/sonnet/internal/types"
+	"reflect"
+	"strconv"
 )
 
 type (
-	// A Decoder reads and decodes JSON values from an input stream.
-	Decoder struct {
-		sess decoder.Session
-	}
+	fieldError string
+	decoder    func(byte, reflect.Value, *Decoder) error
 )
+
+var (
+	decs = makeCache[reflect.Type, decoder]()
+)
+
+func (err fieldError) Error() string {
+	return "sonnet: " + string(err)
+}
 
 // NewDecoder returns a new decoder that reads from r.
 //
 // The decoder introduces its own buffering and may
 // read data from r beyond the JSON values requested.
-func NewDecoder(with io.Reader) *Decoder {
-	dec := Decoder{
-		sess: decoder.NewSession(
-			with,
-			pool.Iter(),
-		),
+func NewDecoder(inp io.Reader) *Decoder {
+	return &Decoder{
+		buf: mem.Get(1 << 10)[:0],
+		inp: inp,
 	}
-	return &dec
+}
+
+// Buffered returns a reader of the data remaining in the Decoder's
+// buffer. The reader is valid until the next call to Decode.
+func (dec *Decoder) Buffered() io.Reader {
+	return bytes.NewReader(dec.buf[dec.pos:])
+}
+
+// More reports whether there is another element in the
+// current array or object being parsed.
+func (dec *Decoder) More() bool {
+	dec.eatSpaces()
+	if dec.pos >= len(dec.buf) && !dec.fill() {
+		return false
+	}
+	head := dec.buf[dec.pos]
+	return head != ']' && head != '}'
+}
+
+// Valid reports whether data is a valid JSON encoding.
+func Valid(inp []byte) bool {
+	dec := Decoder{
+		buf: inp,
+	}
+	dec.eatSpaces()
+	if len(dec.buf) <= dec.pos {
+		return false
+	}
+	head := dec.buf[dec.pos]
+	dec.pos++
+	return dec.skip(head) == nil
+}
+
+func (dec *Decoder) decode(val any) error {
+	ref := reflect.ValueOf(val)
+	typ := reflect.TypeOf(val)
+	if ref.Kind() != reflect.Pointer || ref.IsNil() {
+		// Kind check should be first, otherwise IsNil panics
+		// because of a non-pointer value.
+		return &InvalidUnmarshalError{Type: typ}
+	}
+	elm := typ.Elem() // known to be a pointer.
+	fnc, ok := decs.get(elm)
+	if !ok {
+		fnc = compileDecoder(elm)
+		decs.set(elm, fnc)
+	}
+	dec.eatSpaces()
+	if dec.pos >= len(dec.buf) && !dec.fill() {
+		return dec.errSyntax("unexpected EOF reading a byte")
+	}
+	head := dec.buf[dec.pos]
+	dec.pos++
+	return addPointer(fnc(head, ref.Elem(), dec))
+}
+
+func addPointer(err error) error {
+	// the encoding/json library checks type mismatches
+	// of TextUnmarshaler's before applying
+	// dereferenced values. mimic the handling.
+	if err, ok := err.(*UnmarshalTypeError); ok {
+		ptr := reflect.PointerTo(err.Type)
+		if ptr.Implements(textUnmarshaler) {
+			err.Type = ptr
+		}
+	}
+	return err
+}
+
+// InputOffset returns the input stream byte offset of the current decoder position.
+// The offset gives the location of the end of the most recently returned token
+// and the beginning of the next token.
+func (dec *Decoder) InputOffset() int64 {
+	return int64(dec.prev + dec.pos)
+}
+
+// DisallowUnknownFields causes the Decoder to return an error when the destination
+// is a struct and the input contains object keys which do not match any
+// non-ignored, exported fields in the destination.
+func (dec *Decoder) DisallowUnknownFields() {
+	dec.opt |= optUnknownFields
+}
+
+// UseNumber causes the Decoder to unmarshal a number into an interface{} as a
+// Number instead of as a float64.
+func (dec *Decoder) UseNumber() {
+	dec.opt |= optNumber
 }
 
 // Decode reads the next JSON-encoded value from its
@@ -35,63 +126,8 @@ func NewDecoder(with io.Reader) *Decoder {
 //
 // See the documentation for Unmarshal for details about
 // the conversion of JSON into a Go value.
-func (dec *Decoder) Decode(this any) error {
-	typ, ptr := types.TypeAndPointerOf(this)
-
-	err := decoder.Evaluate(typ, ptr, &dec.sess)
-	if err != nil {
-		return err
-	}
-
-	pool.Put(dec.sess.Buf)
-	return nil
-}
-
-// DisallowUnknownFields causes the Decoder to return an error when the destination
-// is a struct and the input contains object keys which do not match any
-// non-ignored, exported fields in the destination.
-func (dec *Decoder) DisallowUnknownFields() {
-	dec.sess.DisallowUnknownFields()
-}
-
-// UseNumber causes the Decoder to unmarshal a number into an interface{} as a
-// Number instead of as a float64.
-func (dec *Decoder) UseNumber() {
-	dec.sess.UseNumber()
-}
-
-// Buffered returns a reader of the data remaining in the Decoder's
-// buffer. The reader is valid until the next call to Decode.
-func (dec *Decoder) Buffered() io.Reader {
-	return bytes.NewReader(dec.sess.Buf[dec.sess.Pos:])
-}
-
-// InputOffset returns the input stream byte offset of the current decoder position.
-// The offset gives the location of the end of the most recently returned token
-// and the beginning of the next token.
-func (dec *Decoder) InputOffset() int64 {
-	return dec.sess.InputOffset()
-}
-
-// More reports whether there is another element in the
-// current array or object being parsed.
-func (dec *Decoder) More() bool {
-	return dec.sess.More()
-}
-
-// Token returns the next JSON token in the input stream.
-// At the end of the input stream, Token returns nil, io.EOF.
-//
-// Token guarantees that the delimiters [ ] { } it returns are
-// properly nested and matched: if Token encounters an unexpected
-// delimiter in the input, it will return an error.
-//
-// The input stream consists of basic JSON values—bool, string,
-// number, and null—along with delimiters [ ] { } of type Delim
-// to mark the start and end of arrays and objects.
-// Commas and colons are elided.
-func (dec *Decoder) Token() (Token, error) {
-	return dec.sess.Token()
+func (dec *Decoder) Decode(val any) error {
+	return dec.decode(val)
 }
 
 // Unmarshal parses the JSON-encoded data and stores the result
@@ -169,15 +205,296 @@ func (dec *Decoder) Token() (Token, error) {
 // invalid UTF-16 surrogate pairs are not treated as an error.
 // Instead, they are replaced by the Unicode replacement
 // character U+FFFD.
-func Unmarshal(src []byte, this any) error {
-	typ, ptr := types.TypeAndPointerOf(this)
-
-	sess := decoder.NewSession(nil, src)
-
-	return decoder.Evaluate(typ, ptr, &sess)
+func Unmarshal(inp []byte, val any) error {
+	dec := Decoder{
+		buf: inp,
+	}
+	return dec.decode(val)
 }
 
-// Valid reports whether data is a valid JSON encoding.
-func Valid(bytes []byte) bool {
-	return Unmarshal(bytes, new(any)) == nil
+func compileDecoder(typ reflect.Type) decoder {
+	const lenInt = 5   // int, int8, int16, int32, int64
+	const lenUint = 6  // uint, uint8, uint16, uint32, uint64, uintptr
+	const lenFloat = 2 // float32, float64
+	kind := typ.Kind()
+	ptr := reflect.PointerTo(typ)
+	if kind != reflect.Pointer && ptr.Implements(unmarshaler) {
+		return decodeUnmarshaler
+	}
+	if kind != reflect.Pointer && ptr.Implements(textUnmarshaler) {
+		return decodeTextUnmarshaler
+	}
+	if typ == number {
+		return decodeNumber
+	}
+	if kind == reflect.String {
+		return decodeString
+	}
+	if kind-reflect.Int < lenInt {
+		return decodeInt
+	}
+	if kind-reflect.Uint < lenUint {
+		return decodeUint
+	}
+	if kind-reflect.Float32 < lenFloat {
+		return decodeFloat
+	}
+	if kind == reflect.Bool {
+		return decodeBool
+	}
+	if kind == reflect.Interface {
+		return decodeInterface
+	}
+	if kind == reflect.Array {
+		return compileArrayDecoder(typ)
+	}
+	if kind == reflect.Slice {
+		return compileSliceDecoder(typ)
+	}
+	if kind == reflect.Map {
+		return compileMapDecoder(typ)
+	}
+	if kind == reflect.Struct {
+		return compileStructDecoder(typ)
+	}
+	if kind == reflect.Pointer {
+		return compilePointerDecoder(typ)
+	}
+	return decodeUnsupported
+}
+
+func decodeUnmarshaler(head byte, val reflect.Value, dec *Decoder) error {
+	unm, ok := val.Addr().Interface().(Unmarshaler)
+	if !ok {
+		return nil // the interface was nil.
+	}
+	dec.opt |= optKeep
+	off := dec.pos - 1 // include the head.
+	err := dec.skip(head)
+	if err != nil {
+		return err
+	}
+	dec.opt &^= optKeep
+	return unm.UnmarshalJSON(dec.buf[off:dec.pos])
+}
+
+func decodeTextUnmarshaler(head byte, val reflect.Value, dec *Decoder) error {
+	const ull = "ull"
+	if head == 'n' {
+		part, err := dec.readn(len(ull))
+		if err == nil && string(part) != ull {
+			err = dec.buildErrSyntax(head, ull, part)
+		}
+		return err
+	}
+	if head != '"' {
+		return dec.errUnmarshalType(head, val.Type())
+	}
+	unm, ok := val.Addr().Interface().(encoding.TextUnmarshaler)
+	if !ok {
+		return nil
+	}
+	slice, err := dec.readString()
+	if err != nil {
+		return err
+	}
+	return unm.UnmarshalText(slice)
+}
+
+func decodeNumber(head byte, val reflect.Value, dec *Decoder) error {
+	const ull = "ull"
+	if head == 'n' {
+		part, err := dec.readn(len(ull))
+		if err == nil && string(part) != ull {
+			err = dec.buildErrSyntax(head, ull, part)
+		}
+		return err
+	}
+	dec.opt |= optKeep
+	off := dec.pos - 1
+	if head-'0' >= 10 && head != '-' {
+		// special case, don't use dec.errUnmarshalType.
+		// see test cases #148 - #151 that used to fail.
+		err := dec.skip(head)
+		if err != nil {
+			return err
+		}
+		dec.opt &^= optKeep
+		src := dec.buf[off:dec.pos]
+		return dec.errSyntax("invalid number literal, trying to unmarshal " + strconv.Quote(string(src)) + " into Number")
+	}
+	err := dec.eatNumber() // needed for syntax check.
+	if err != nil {
+		return err
+	}
+	dec.opt &^= optKeep
+	src := dec.buf[off:dec.pos]
+	val.SetString(string(src)) // make sure to copy
+	return nil
+}
+
+func decodeString(head byte, val reflect.Value, dec *Decoder) error {
+	const ull = "ull"
+	if head == 'n' {
+		part, err := dec.readn(len(ull))
+		if err == nil && string(part) != ull {
+			err = dec.buildErrSyntax(head, ull, part)
+		}
+		return err
+	}
+	if head != '"' {
+		return dec.errUnmarshalType(head, val.Type())
+	}
+	str, err := dec.readString()
+	if err != nil {
+		return err
+	}
+	val.SetString(string(str))
+	return nil
+}
+
+func decodeInt(head byte, val reflect.Value, dec *Decoder) error {
+	const ull = "ull"
+	if head == 'n' {
+		part, err := dec.readn(len(ull))
+		if err == nil && string(part) != ull {
+			err = dec.buildErrSyntax(head, ull, part)
+		}
+		return err
+	}
+	if head-'0' >= 10 && head != '-' {
+		return dec.errUnmarshalType(head, val.Type())
+	}
+	i64, err := dec.readInt(head)
+	if err != nil {
+		return err
+	}
+	if val.OverflowInt(i64) {
+		return &UnmarshalTypeError{Value: strconv.FormatInt(i64, 10), Type: val.Type()}
+	}
+	val.SetInt(i64)
+	return nil
+}
+
+func decodeUint(head byte, val reflect.Value, dec *Decoder) error {
+	const ull = "ull"
+	if head == 'n' {
+		part, err := dec.readn(len(ull))
+		if err == nil && string(part) != ull {
+			err = dec.buildErrSyntax(head, ull, part)
+		}
+		return err
+	}
+	if head-'0' >= 10 {
+		return dec.errUnmarshalType(head, val.Type())
+	}
+	u64, err := dec.readUint()
+	if err != nil {
+		return err
+	}
+	if val.OverflowUint(u64) {
+		return &UnmarshalTypeError{Value: strconv.FormatUint(u64, 10), Type: val.Type()}
+	}
+	val.SetUint(u64)
+	return nil
+}
+
+func decodeFloat(head byte, val reflect.Value, dec *Decoder) error {
+	const ull = "ull"
+	if head == 'n' {
+		part, err := dec.readn(len(ull))
+		if err == nil && string(part) != ull {
+			err = dec.buildErrSyntax(head, ull, part)
+		}
+		return err
+	}
+	if head-'0' >= 10 && head != '-' {
+		return dec.errUnmarshalType(head, val.Type())
+	}
+	dec.opt |= optKeep
+	off := dec.pos
+	f64, err := dec.readFloat()
+	if err == strconv.ErrRange {
+		// rare, slow path.
+		dec.pos = off
+		err = dec.eatNumber()
+		if err != nil {
+			return err
+		}
+		f64, err = strconv.ParseFloat(string(dec.buf[off-1:dec.pos]), 64)
+	}
+	if err != nil {
+		return err
+	}
+	dec.opt &^= optKeep
+	if val.OverflowFloat(f64) {
+		return &UnmarshalTypeError{Value: strconv.FormatFloat(f64, 'g', -1, 64), Type: val.Type()}
+	}
+	val.SetFloat(f64)
+	return nil
+}
+
+func decodeBool(head byte, val reflect.Value, dec *Decoder) error {
+	word := keywords[head]
+	if len(word) <= 0 {
+		return dec.errUnmarshalType(head, val.Type())
+	}
+	part, err := dec.readn(len(word))
+	if err != nil {
+		return err
+	}
+	if string(part) != word {
+		return dec.buildErrSyntax(head, word, part)
+	}
+	if head != 'n' {
+		val.SetBool(head == 't')
+	}
+	return nil
+}
+
+func decodeInterface(head byte, val reflect.Value, dec *Decoder) error {
+	const ull = "ull"
+	if !val.IsNil() && val.Elem().Kind() == reflect.Pointer && val != val.Elem().Elem() {
+		next := val.Elem()        // known to be a pointer
+		typ := next.Type().Elem() // a type the pointer above points to.
+		is := next.IsNil()
+		if is {
+			val.Set(reflect.New(typ))
+			next = val.Elem()
+		}
+		if (is || typ.Kind() != reflect.Pointer) && head == 'n' {
+			part, err := dec.readn(len(ull))
+			if err != nil {
+				return err
+			}
+			if string(part) != ull {
+				return dec.buildErrSyntax(head, ull, part)
+			}
+			val.SetZero()
+			return nil
+		}
+		fnc, ok := decs.get(typ)
+		if !ok {
+			fnc = compileDecoder(typ)
+			decs.set(typ, fnc)
+		}
+		return fnc(head, next.Elem(), dec)
+	}
+	if val.NumMethod() != 0 {
+		return dec.errUnmarshalType(head, val.Type())
+	}
+	an, err := dec.readAny(head)
+	if err != nil {
+		return err
+	}
+	if an != nil {
+		val.Set(reflect.ValueOf(an))
+	} else {
+		val.SetZero()
+	}
+	return nil
+}
+
+func decodeUnsupported(head byte, val reflect.Value, dec *Decoder) error {
+	return errors.New("sonnet: unsupported type: " + val.Type().String())
 }

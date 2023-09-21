@@ -1,44 +1,22 @@
 ## Sonnet
 
-![gopher.jpeg](./gopher.jpeg)
+High performance JSON library in Go.
 
-High performance JSON decoder in Go
+![gopher.png](./gopher.png)
 
 ### Features
 
-- 100% compatible with the Go standard library.
+- Fully compatible with the Go standard library, Both the encoder and the decoder passed all tests from it.
 
-- Efficient. uses less memory and roughly 5 times faster than the standard library when decoding JSON.
+- Efficient. Uses less memory and several times shorter decoding time when I benchmark this against the standard library.
 
-- Decent streaming (io.Reader) support. 
+- "encoding/json" independent. Unlike some of other implementations, It doesn't call the standard library's JSON, at all. it's written from ground up.
 
-### Motivation
+### The problems of others
 
-- Why another JSON decoder?
+Some are CPU dependent, some libraries' APIs are incompatible, most of them use unsafe, some requires static code generation, etc.
 
-I was amazed at the number of JSON packages, but I guess i was more surprised when I realized the problems they had. I'll mention that in the next section. In short... they were incompatible, and slow. That's when I decided to create this.
-
-### Problems we had
-
-- CPU dependent
-
-Use of assembly; drops support for things like M1/raspberry pi, since they have different architectures
-
-- Not user friendly
-
-Complicated and (or) Incompatible APIs - making the migration difficult.
-
-- Preparation
-
-A switch-case needs to be written by the user, or a static code generation needs to be used.
-
-- Not actively maintained
-
-Newer versions are often unsupported. they sometimes have EOL packages as dependencies
-
-- Not so fast at the end
-
-Lots of reflections, poor streaming (io.Reader) features
+But that's not all. even with these downsides, they're still slow.
 
 ### Installation
 
@@ -52,30 +30,23 @@ The usage is the same as the standard library.
 
 Use [pkg.go.dev](https://pkg.go.dev/encoding/json) website, or read [the blog post](https://go.dev/blog/json)
 
-### Benchmarks 
+### Performance differences after the removal of unsafe
 
-- https://pkg.go.dev/encoding/json
+After some effort, it's actually faster than the previous one. See the below benchmarks for more information.
 
-- https://pkg.go.dev/github.com/goccy/go-json
-
-- https://pkg.go.dev/github.com/json-iterator/go
-
-- https://pkg.go.dev/github.com/segmentio/encoding/json
-
-- https://pkg.go.dev/github.com/bytedance/sonic
-
-- https://pkg.go.dev/github.com/francoispqt/gojay
-
-| [Medium Payload](https://github.com/goccy/go-json/blob/master/benchmarks/medium_payload.go#L6) |
-| :---: |
-| ![medium.png](./medium.png) | 
-
-| [Small Payload](https://github.com/goccy/go-json/blob/master/benchmarks/small_payload.go#L5) | [Large Payload](https://github.com/goccy/go-json/blob/master/benchmarks/large_payload.go#L153) |
+| Marshal | Unmarshal |
 | :---: | :---: |
-| ![small.png](./small.png) | ![large.png](./large.png) |
+| ![marshal.png](./marshal.png) | ![unmarshal.png](./unmarshal.png) |
 
-### Thanks
+### Benchmarks
 
-- The reader in this package is inspired by [pkg/json](https://github.com/pkg/json)
+Although I recommend you to benchmark this yourself, [here](https://github.com/sugawarayuuta/benchmark) is benchmarks on my machine for reference. (currently, it's showing the old version. It'll be updated to the latest version of this, soon)
 
-- [Article written by goccy](https://engineering.mercari.com/blog/entry/1599563768-081104c850/), the author of goccy/go-json (in Japanese). useful and above all interesting.
+In short, At least in my environment, I couldn't find a faster library that is implemented "correctly". "correct", as in, proper UTF8 handling, validation of RawMessage, and others. Which some of the alternatives don't do.
+
+
+### Thank you
+
+- the icon above is from [ashleymcnamara/gophers](https://github.com/ashleymcnamara/gophers), Thank you!
+
+- Daniel Lemire's work (several) [simdjson](https://github.com/simdjson/simdjson), [fast_double_parser](https://github.com/lemire/fast_double_parser), etc.

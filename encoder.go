@@ -2,31 +2,34 @@ package sonnet
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding"
+	"errors"
+	"github.com/sugawarayuuta/sonnet/internal/mem"
 	"io"
-	"unsafe"
-
-	"github.com/sugawarayuuta/sonnet/internal/encoder"
-	"github.com/sugawarayuuta/sonnet/internal/pool"
-	"github.com/sugawarayuuta/sonnet/internal/types"
+	"reflect"
+	"strconv"
 )
 
 type (
 	Encoder struct {
-		writer io.Writer
+		out    io.Writer
+		html   bool
+		level  uint
 		prefix string
 		indent string
-		html   bool
+		seen   map[any]struct{}
 	}
+	encoder func([]byte, reflect.Value, *Encoder) ([]byte, error)
 )
 
-// NewEncoder returns a new encoder that writes to w.
-func NewEncoder(with io.Writer) *Encoder {
-	enc := Encoder{
-		writer: with,
-	}
-	return &enc
-}
+var (
+	encs = makeCache[reflect.Type, encoder]()
+	lens = makeCache[reflect.Type, int]()
+)
+
+const (
+	maxCycles = 1000
+)
 
 // Marshal returns the JSON encoding of v.
 //
@@ -45,6 +48,7 @@ func NewEncoder(with io.Writer) *Encoder {
 // Boolean values encode as JSON booleans.
 //
 // Floating point, integer, and Number values encode as JSON numbers.
+// NaN and +/-Inf values will return an [UnsupportedValueError].
 //
 // String values encode as JSON strings coerced to valid UTF-8,
 // replacing invalid bytes with the Unicode replacement rune.
@@ -157,41 +161,28 @@ func NewEncoder(with io.Writer) *Encoder {
 // JSON cannot represent cyclic data structures and Marshal does not
 // handle them. Passing cyclic structures to Marshal will result in
 // an error.
-func Marshal(this any) ([]byte, error) {
-
-	src := pool.Iter()
-
-	typ, ptr := types.TypeAndPointerOf(this)
-
-	sess := encoder.NewSession(true)
-
-	src, err := encoder.Evaluate(src, typ, &ptr, sess)
-	if err != nil {
-		return nil, err
-	}
-
-	length := uintptr(len(src))
-	dst := unsafe.Slice((*byte)(types.MallocGC(length, nil, false)), length)
-	dst = dst[:copy(dst, src)]
-	pool.Put(src)
-
-	return dst, nil
+func Marshal(val any) ([]byte, error) {
+	enc := Encoder{html: true}
+	return enc.encode(val)
 }
 
 // MarshalIndent is like Marshal but applies Indent to format the output.
 // Each JSON element in the output will begin on a new line beginning with prefix
 // followed by one or more copies of indent according to the indentation nesting.
-func MarshalIndent(this any, prefix, indent string) ([]byte, error) {
-	dst, err := Marshal(this)
-
+func MarshalIndent(val any, prefix, indent string) ([]byte, error) {
+	dst, err := Marshal(val)
 	if err == nil {
 		var buf bytes.Buffer
 		buf.Grow(len(dst) * 2)
 		err = Indent(&buf, dst, prefix, indent)
 		dst = buf.Bytes()
 	}
-
 	return dst, err
+}
+
+// NewEncoder returns a new encoder that writes to w.
+func NewEncoder(out io.Writer) *Encoder {
+	return &Encoder{out: out}
 }
 
 // Encode writes the JSON encoding of v to the stream,
@@ -199,39 +190,29 @@ func MarshalIndent(this any, prefix, indent string) ([]byte, error) {
 //
 // See the documentation for Marshal for details about the
 // conversion of Go values to JSON.
-func (enc *Encoder) Encode(this any) error {
-
-	dst := pool.Iter()
-
-	typ, ptr := types.TypeAndPointerOf(this)
-
-	sess := encoder.NewSession(enc.html)
-
-	dst, err := encoder.Evaluate(dst, typ, &ptr, sess)
+func (enc *Encoder) Encode(val any) error {
+	dst, err := enc.encode(val)
 	if err != nil {
 		return err
 	}
-
-	dst = append(dst, '\n')
-
 	if enc.prefix != "" || enc.indent != "" {
 		var buf bytes.Buffer
 		buf.Grow(len(dst) * 2)
-		err := Indent(&buf, dst, enc.prefix, enc.indent)
+		err = Indent(&buf, dst, enc.prefix, enc.indent)
 		if err != nil {
 			return err
 		}
 		dst = buf.Bytes()
 	}
-
-	wrote, err := enc.writer.Write(dst)
-	if wrote < len(dst) && err == nil {
-		err = io.ErrShortWrite
+	wrt, err := enc.out.Write(dst)
+	if err != nil {
+		return err
 	}
-
-	pool.Put(dst)
-
-	return err
+	if wrt != len(dst) {
+		return io.ErrShortWrite
+	}
+	mem.Put(dst)
+	return nil
 }
 
 // SetEscapeHTML specifies whether problematic HTML characters
@@ -256,7 +237,28 @@ func (enc *Encoder) SetIndent(prefix, indent string) {
 // Compact appends to dst the JSON-encoded src with
 // insignificant space characters elided.
 func Compact(dst *bytes.Buffer, src []byte) error {
-	return json.Compact(dst, src)
+	dst.Grow(len(src))
+	buf := dst.AvailableBuffer()
+	comp := compactor{
+		dst:  buf,
+		src:  src,
+		html: false,
+	}
+	comp.eatSpaces()
+	if len(src) <= comp.read {
+		return comp.errSyntax("unexpected EOF reading a byte")
+	}
+	head := src[comp.read]
+	comp.read++
+	err := comp.compact(head)
+	if err != nil {
+		return err
+	}
+	if comp.write < comp.read {
+		comp.dst = append(comp.dst, comp.src[comp.write:comp.read]...)
+	}
+	dst.Write(comp.dst)
+	return nil
 }
 
 // HTMLEscape appends to dst the JSON-encoded src with <, >, &, U+2028 and U+2029
@@ -266,7 +268,26 @@ func Compact(dst *bytes.Buffer, src []byte) error {
 // escaping within <script> tags, so an alternative JSON encoding must
 // be used.
 func HTMLEscape(dst *bytes.Buffer, src []byte) {
-	json.HTMLEscape(dst, src)
+	const hex = "0123456789abcdef"
+	dst.Grow(len(src))
+	buf := dst.AvailableBuffer()
+	// The characters can only appear in string literals,
+	// so just scan the string one byte at a time.
+	start := 0
+	for idx, char := range src {
+		if char == '<' || char == '>' || char == '&' {
+			buf = append(buf, src[start:idx]...)
+			buf = append(buf, '\\', 'u', '0', '0', hex[char>>4], hex[char&0xF])
+			start = idx + 1
+		}
+		// Convert U+2028 and U+2029 (E2 80 A8 and E2 80 A9).
+		if char == 0xE2 && idx+2 < len(src) && src[idx+1] == 0x80 && src[idx+2]&^1 == 0xA8 {
+			buf = append(buf, src[start:idx]...)
+			buf = append(buf, '\\', 'u', '2', '0', '2', hex[src[idx+2]&0xF])
+			start = idx + len("\u2029")
+		}
+	}
+	dst.Write(append(buf, src[start:]...))
 }
 
 // Indent appends to dst an indented form of the JSON-encoded src.
@@ -281,5 +302,230 @@ func HTMLEscape(dst *bytes.Buffer, src []byte) {
 // For example, if src has no trailing spaces, neither will dst;
 // if src ends in a trailing newline, so will dst.
 func Indent(dst *bytes.Buffer, src []byte, prefix, indent string) error {
-	return json.Indent(dst, src, prefix, indent)
+	dst.Grow(len(src) * 2)
+	buf := dst.AvailableBuffer()
+	comp := compactor{
+		dst:    buf,
+		src:    src,
+		html:   false,
+		prefix: prefix,
+		indent: indent,
+	}
+	comp.eatSpaces()
+	if len(src) <= comp.read {
+		return comp.errSyntax("unexpected EOF reading a byte")
+	}
+	head := src[comp.read]
+	comp.read++
+	err := comp.compact(head)
+	if err != nil {
+		return err
+	}
+	if comp.write < comp.read {
+		comp.dst = append(comp.dst, comp.src[comp.write:comp.read]...)
+	}
+	dst.Write(comp.dst)
+	return nil
+}
+
+func (enc *Encoder) encode(val any) ([]byte, error) {
+	ref := reflect.ValueOf(val)
+	typ := reflect.TypeOf(val)
+	if val == nil {
+		return []byte("null"), nil
+	}
+	num, ok := lens.get(typ)
+	if !ok {
+		num = 1 << 10
+	}
+	dst := mem.Get(num)[:0]
+	fnc, ok := encs.get(typ)
+	if !ok {
+		fnc = compileEncoder(typ, true)
+		encs.set(typ, fnc)
+	}
+	dst, err := fnc(dst, ref, enc)
+	if err != nil {
+		return nil, err
+	}
+	num += len(dst)
+	lens.set(typ, (num+num&1)>>1)
+	return dst, nil
+}
+
+func compileEncoder(typ reflect.Type, addr bool) encoder {
+	const lenInt = 5   // int, int8, int16, int32, int64
+	const lenUint = 6  // uint, uint8, uint16, uint32, uint64, uintptr
+	const lenFloat = 2 // float32, float64
+	kind := typ.Kind()
+	ptr := reflect.PointerTo(typ)
+	if addr && kind != reflect.Pointer && ptr.Implements(marshaler) {
+		return compilePointerMarshalerEncoder(typ)
+	}
+	if addr && kind != reflect.Pointer && ptr.Implements(textMarshaler) {
+		return compilePointerTextMarshalerEncoder(typ)
+	}
+	if typ.Implements(marshaler) {
+		return encodeMarshaler
+	}
+	if typ.Implements(textMarshaler) {
+		return encodeTextMarshaler
+	}
+	if typ == number {
+		return encodeNumber
+	}
+	if kind == reflect.String {
+		return encodeString
+	}
+	if kind-reflect.Int < lenInt {
+		return encodeInt
+	}
+	if kind-reflect.Uint < lenUint {
+		return encodeUint
+	}
+	if kind-reflect.Float32 < lenFloat {
+		return encodeFloat
+	}
+	if kind == reflect.Bool {
+		return encodeBool
+	}
+	if kind == reflect.Interface {
+		return encodeInterface
+	}
+	if kind == reflect.Array {
+		return compileArrayEncoder(typ)
+	}
+	if kind == reflect.Slice {
+		return compileSliceEncoder(typ)
+	}
+	if kind == reflect.Map {
+		return compileMapEncoder(typ)
+	}
+	if kind == reflect.Struct {
+		return compileStructEncoder(typ)
+	}
+	if kind == reflect.Pointer {
+		return compilePointerEncoder(typ)
+	}
+	return encodeUnsupported
+}
+
+func encodeMarshaler(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	const fnc = "MarshalJSON"
+	if val.Kind() == reflect.Pointer && val.IsNil() {
+		return append(dst, "null"...), nil
+	}
+	mar, ok := val.Interface().(Marshaler)
+	if !ok {
+		return append(dst, "null"...), nil
+	}
+	src, err := mar.MarshalJSON()
+	if err != nil {
+		return nil, &MarshalerError{
+			Type:       val.Type(),
+			Err:        err,
+			sourceFunc: fnc,
+		}
+	}
+
+	comp := compactor{
+		dst:  dst,
+		src:  src,
+		html: enc.html,
+	}
+	comp.eatSpaces()
+	if len(src) <= comp.read {
+		return nil, &MarshalerError{
+			Type:       val.Type(),
+			Err:        comp.errSyntax("unexpected EOF reading a byte"),
+			sourceFunc: fnc,
+		}
+	}
+	head := src[comp.read]
+	comp.read++
+
+	err = comp.compact(head)
+	if err != nil {
+		return nil, err
+	}
+	if comp.write < comp.read {
+		comp.dst = append(comp.dst, comp.src[comp.write:comp.read]...)
+	}
+	return comp.dst, nil
+}
+
+func encodeTextMarshaler(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	const fnc = "MarshalText"
+	if val.Kind() == reflect.Pointer && val.IsNil() {
+		return append(dst, "null"...), nil
+	}
+	mar, ok := val.Interface().(encoding.TextMarshaler)
+	if !ok {
+		return append(dst, "null"...), nil
+	}
+	src, err := mar.MarshalText()
+	if err != nil {
+		return nil, &MarshalerError{
+			Type:       val.Type(),
+			Err:        err,
+			sourceFunc: fnc,
+		}
+	}
+	return appendString(dst, string(src), enc.html), nil
+}
+
+func encodeNumber(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	num := val.String()
+	if num == "" {
+		num = "0"
+	}
+	if !isValidNumber(num) {
+		return nil, errors.New("sonnet: invalid number literal: " + strconv.Quote(num))
+	}
+	return append(dst, num...), nil
+}
+
+func encodeString(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	return appendString(dst, val.String(), enc.html), nil
+}
+
+func encodeInt(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	i64 := val.Int()
+	if i64 < 0 {
+		return append(dst, fmtInt(uint64(-i64), true)...), nil
+	}
+	return append(dst, fmtInt(uint64(i64), false)...), nil
+}
+
+func encodeUint(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	u64 := val.Uint()
+	return append(dst, fmtInt(u64, false)...), nil
+}
+
+func encodeFloat(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	return appendFloat(dst, val.Float(), val.Type().Bits())
+}
+
+func encodeBool(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	if val.Bool() {
+		return append(dst, "true"...), nil
+	}
+	return append(dst, "false"...), nil
+}
+
+func encodeInterface(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	if val.IsNil() {
+		return append(dst, "null"...), nil
+	}
+	val = val.Elem()
+	fnc, ok := encs.get(val.Type())
+	if !ok {
+		fnc = compileEncoder(val.Type(), true)
+		encs.set(val.Type(), fnc)
+	}
+	return fnc(dst, val, enc)
+}
+
+func encodeUnsupported(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
+	return nil, &UnsupportedTypeError{Type: val.Type()}
 }

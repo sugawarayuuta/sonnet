@@ -7,7 +7,6 @@ package sonnet
 import (
 	"bytes"
 	"encoding"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -16,8 +15,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"testing"
-
-	"github.com/sugawarayuuta/sonnet/internal/compat"
 )
 
 type Optionals struct {
@@ -135,7 +132,7 @@ func TestRoundtripStringTag(t *testing.T) {
 
 			// Verify that it round-trips.
 			var s2 StringTag
-			if err := json.Unmarshal(got, &s2); err != nil {
+			if err := Unmarshal(got, &s2); err != nil {
 				t.Fatalf("Decode: %v", err)
 			}
 			if !reflect.DeepEqual(test.in, s2) {
@@ -207,7 +204,7 @@ func init() {
 	mapCycle["x"] = mapCycle
 	sliceCycle[0] = sliceCycle
 	sliceNoCycle[1] = sliceNoCycle[:1]
-	for i := 1000; i > 0; i-- {
+	for i := maxCycles; i > 0; i-- {
 		sliceNoCycle = []any{sliceNoCycle}
 	}
 	recursiveSliceCycle[0] = recursiveSliceCycle
@@ -703,54 +700,6 @@ func TestDuplicatedFieldDisappears(t *testing.T) {
 	}
 }
 
-// func TestStringBytes(t *testing.T) {
-// 	t.Parallel()
-// 	// Test that encodeState.stringBytes and encodeState.string use the same encoding.
-// 	var r []rune
-// 	for i := '\u0000'; i <= unicode.MaxRune; i++ {
-// 		if testing.Short() && i > 1000 {
-// 			i = unicode.MaxRune
-// 		}
-// 		r = append(r, i)
-// 	}
-// 	s := string(r) + "\xff\xff\xffhello" // some invalid UTF-8 too
-
-// 	for _, escapeHTML := range []bool{true, false} {
-// 		es := &encodeState{}
-// 		es.string(s, escapeHTML)
-
-// 		esBytes := &encodeState{}
-// 		esBytes.stringBytes([]byte(s), escapeHTML)
-
-// 		enc := es.Buffer.String()
-// 		encBytes := esBytes.Buffer.String()
-// 		if enc != encBytes {
-// 			i := 0
-// 			for i < len(enc) && i < len(encBytes) && enc[i] == encBytes[i] {
-// 				i++
-// 			}
-// 			enc = enc[i:]
-// 			encBytes = encBytes[i:]
-// 			i = 0
-// 			for i < len(enc) && i < len(encBytes) && enc[len(enc)-i-1] == encBytes[len(encBytes)-i-1] {
-// 				i++
-// 			}
-// 			enc = enc[:len(enc)-i]
-// 			encBytes = encBytes[:len(encBytes)-i]
-
-// 			if len(enc) > 20 {
-// 				enc = enc[:20] + "..."
-// 			}
-// 			if len(encBytes) > 20 {
-// 				encBytes = encBytes[:20] + "..."
-// 			}
-
-// 			t.Errorf("with escapeHTML=%t, encodings differ at %#q vs %#q",
-// 				escapeHTML, enc, encBytes)
-// 		}
-// 	}
-// }
-
 func TestIssue10281(t *testing.T) {
 	type Foo struct {
 		N Number
@@ -790,7 +739,7 @@ func TestMarshalErrorAndReuseEncodeState(t *testing.T) {
 	}
 
 	var data2 Data
-	if err := json.Unmarshal(b, &data2); err != nil {
+	if err := Unmarshal(b, &data2); err != nil {
 		t.Errorf("Unmarshal(%v) = %v", data2, err)
 	}
 	if data2 != data {
@@ -822,7 +771,7 @@ func TestEncodePointerString(t *testing.T) {
 		t.Errorf("Marshal = %s, want %s", got, want)
 	}
 	var back stringPointer
-	err = json.Unmarshal(b, &back)
+	err = Unmarshal(b, &back)
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
@@ -1223,11 +1172,11 @@ func TestMarshalerError(t *testing.T) {
 		want string
 	}{
 		{
-			compat.NewMarshalerError(st, fmt.Errorf(errText), ""),
+			&MarshalerError{st, fmt.Errorf(errText), ""},
 			"sonnet: error calling MarshalJSON for type " + st.String() + ": " + errText,
 		},
 		{
-			compat.NewMarshalerError(st, fmt.Errorf(errText), "TestMarshalerError"),
+			&MarshalerError{st, fmt.Errorf(errText), "TestMarshalerError"},
 			"sonnet: error calling TestMarshalerError for type " + st.String() + ": " + errText,
 		},
 	}
