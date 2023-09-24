@@ -7,6 +7,18 @@ import (
 	"sync"
 )
 
+type (
+	sliceValue struct {
+		reflect.Value
+	}
+)
+
+func (slice *sliceValue) clearTo(to int) {
+	slice.SetLen(to)
+	slice.Clear()
+	slice.SetLen(slice.Cap())
+}
+
 func compileSliceDecoder(typ reflect.Type) decoder {
 	elm := typ.Elem()
 	fnc, ok := decs.get(elm)
@@ -19,7 +31,7 @@ func compileSliceDecoder(typ reflect.Type) decoder {
 	pool := sync.Pool{
 		New: func() any {
 			val := reflect.New(typ).Elem()
-			return &val
+			return &sliceValue{Value: val}
 		},
 	}
 	var once sync.Once
@@ -46,10 +58,7 @@ func compileSliceDecoder(typ reflect.Type) decoder {
 
 		once.Do(rep)
 
-		get := pool.Get().(*reflect.Value)
-		defer pool.Put(get)
-		assign := *get
-
+		assign := pool.Get().(*sliceValue)
 		for idx := 0; ; idx++ {
 			dec.eatSpaces()
 			if dec.pos >= len(dec.buf) && !dec.fill() {
@@ -58,12 +67,14 @@ func compileSliceDecoder(typ reflect.Type) decoder {
 			head = dec.buf[dec.pos]
 			dec.pos++
 			if head == ']' && idx == 0 {
+				leng := 0
 				// already finished in the first iteration,
 				// we know this is 0-sized.
 				if val.IsNil() {
-					val.Set(reflect.MakeSlice(val.Type(), 0, 0))
+					val.Set(reflect.MakeSlice(val.Type(), leng, leng))
 				}
-				val.SetLen(0)
+				val.SetLen(leng)
+				pool.Put(assign)
 				dec.dep--
 				return nil
 			}
@@ -82,11 +93,14 @@ func compileSliceDecoder(typ reflect.Type) decoder {
 			head = dec.buf[dec.pos]
 			dec.pos++
 			if head == ']' {
+				leng := idx + 1
 				if idx >= val.Cap() {
-					val.Set(reflect.MakeSlice(val.Type(), idx+1, idx+1))
+					val.Set(reflect.MakeSlice(val.Type(), leng, leng))
 				}
-				val.SetLen(idx + 1) // make sure Copy stops at idx+1.
-				reflect.Copy(val, assign)
+				val.SetLen(leng) // make sure Copy stops at idx+1.
+				reflect.Copy(val, assign.Value)
+				assign.clearTo(leng)
+				pool.Put(assign)
 				dec.dep--
 				return nil
 			}

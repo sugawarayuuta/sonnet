@@ -119,6 +119,7 @@ func compileMapDecoder(typ reflect.Type) decoder {
 			head = dec.buf[dec.pos]
 			dec.pos++
 
+			assign.SetZero()
 			err = fnc(head, assign, dec)
 			if err != nil {
 				return err

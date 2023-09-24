@@ -24,9 +24,9 @@ func init() {
 }
 
 func Get(capacity int) []byte {
-	pos := bits.Len(uint(capacity)>>shift) - 1
 	mtx.RLock()
 	defer mtx.RUnlock()
+	pos := bits.Len(uint(capacity)>>shift) - 1
 	if uint(pos) < def {
 		slice, ok := buf.at(pos).Get().(*[]byte)
 		if ok && cap(*slice) >= capacity {
@@ -37,10 +37,10 @@ func Get(capacity int) []byte {
 }
 
 func Put(slice []byte) {
-	// this -1 excludes 0's from the list.
-	pos := bits.Len(uint(cap(slice))>>shift) - 1
 	mtx.Lock()
 	defer mtx.Unlock()
+	// this -1 excludes 0's from the list.
+	pos := bits.Len(uint(cap(slice))>>shift) - 1
 	if pos < 0 && shift > 0 {
 		var pool sync.Pool
 		shift--

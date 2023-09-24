@@ -43,30 +43,6 @@ var (
 		'r':  '\r',
 		't':  '\t',
 	}
-	hex = [1 << 8]rune{
-		'0': 0,
-		'1': 1,
-		'2': 2,
-		'3': 3,
-		'4': 4,
-		'5': 5,
-		'6': 6,
-		'7': 7,
-		'8': 8,
-		'9': 9,
-		'A': 10,
-		'B': 11,
-		'C': 12,
-		'D': 13,
-		'E': 14,
-		'F': 15,
-		'a': 10,
-		'b': 11,
-		'c': 12,
-		'd': 13,
-		'e': 14,
-		'f': 15,
-	}
 	accepts = [1 << 4]accept{
 		{lo: 0x80, hi: (0xbf - 0x80)},
 		{lo: 0xa0, hi: (0xbf - 0xa0)},
@@ -259,12 +235,18 @@ func escape(dst []byte, dec *Decoder) ([]byte, error) {
 			if !dec.makeSpace(4) {
 				return nil, dec.errSyntax("not enough space to create Unicode code point")
 			}
-			one := dec.hex()
+			one, err := dec.hex()
+			if err != nil {
+				return nil, err
+			}
 			dec.pos += 4
 			if utf16.IsSurrogate(one) {
 				if dec.makeSpace(6) && string(dec.buf[dec.pos:dec.pos+len(pref)]) == pref {
 					dec.pos += len(pref)
-					two := dec.hex()
+					two, err := dec.hex()
+					if err != nil {
+						return nil, err
+					}
 					run := utf16.DecodeRune(one, two)
 					if run != utf8.RuneError {
 						dec.pos += 4
@@ -293,9 +275,16 @@ func escape(dst []byte, dec *Decoder) ([]byte, error) {
 		} else {
 			mid := heads[char&^0x80]
 			lo := int(mid & 7)
+			if !dec.makeSpace(pos+lo) || mid == 0xf1 {
+				dst = append(dst, dec.buf[dec.pos:dec.pos+pos]...)
+				dec.pos += pos + 1
+				pos = 0
+				dst = utf8.AppendRune(dst, utf8.RuneError)
+				continue
+			}
 			acc := accepts[mid>>4]
 			runes := dec.buf[dec.pos+pos:]
-			if len(runes) < lo || mid == 0xf1 || runes[1]-acc.lo > acc.hi || lo > 2 && (runes[2]|runes[lo-1])>>6 != 2 {
+			if runes[1]-acc.lo > acc.hi || lo > 2 && (runes[2]|runes[lo-1])>>6 != 2 {
 				dst = append(dst, dec.buf[dec.pos:dec.pos+pos]...)
 				dec.pos += pos + 1
 				pos = 0
@@ -309,11 +298,7 @@ func escape(dst []byte, dec *Decoder) ([]byte, error) {
 }
 
 func (dec *Decoder) makeSpace(off int) bool {
-	enough := dec.pos+off <= len(dec.buf)
-	if !enough && dec.fill() {
-		enough = dec.pos+off <= len(dec.buf)
-	}
-	return enough
+	return dec.pos+off <= len(dec.buf) || dec.fill() && dec.pos+off <= len(dec.buf)
 }
 
 func (dec *Decoder) readString() ([]byte, error) {
@@ -340,12 +325,23 @@ func (dec *Decoder) readString() ([]byte, error) {
 	return dec.sub, nil
 }
 
-func (dec *Decoder) hex() rune {
-	run := hex[dec.buf[dec.pos]]
-	run = run<<4 | hex[dec.buf[dec.pos+1]]
-	run = run<<4 | hex[dec.buf[dec.pos+2]]
-	run = run<<4 | hex[dec.buf[dec.pos+3]]
-	return run
+func (dec *Decoder) hex() (rune, error) {
+	var run rune
+	for idx := 0; idx < 4; idx++ {
+		char := dec.buf[dec.pos+idx]
+		switch {
+		case '0' <= char && char <= '9':
+			char = char - '0'
+		case 'a' <= char && char <= 'f':
+			char = char - 'a' + 10
+		case 'A' <= char && char <= 'F':
+			char = char - 'A' + 10
+		default:
+			return -1, dec.errSyntax("invalid character " + strconv.QuoteRune(rune(char)) + " in \\u hexadecimal character escape")
+		}
+		run = run<<4 + rune(char)
+	}
+	return run, nil
 }
 
 func (dec *Decoder) readFloat() (float64, error) {

@@ -62,7 +62,12 @@ func Valid(inp []byte) bool {
 	}
 	head := dec.buf[dec.pos]
 	dec.pos++
-	return dec.skip(head) == nil
+	err := dec.skip(head)
+	if err != nil {
+		return false
+	}
+	dec.eatSpaces()
+	return dec.pos >= len(dec.buf)
 }
 
 func (dec *Decoder) decode(val any) error {
@@ -85,7 +90,12 @@ func (dec *Decoder) decode(val any) error {
 	}
 	head := dec.buf[dec.pos]
 	dec.pos++
-	return addPointer(fnc(head, ref.Elem(), dec))
+	err := addPointer(fnc(head, ref.Elem(), dec))
+	if err != nil {
+		return err
+	}
+	dec.eatSpaces()
+	return nil
 }
 
 func addPointer(err error) error {
@@ -209,7 +219,11 @@ func Unmarshal(inp []byte, val any) error {
 	dec := Decoder{
 		buf: inp,
 	}
-	return dec.decode(val)
+	err := dec.decode(val)
+	if err == nil && dec.pos < len(dec.buf) {
+		err = dec.errSyntax("invalid character " + strconv.QuoteRune(rune(dec.buf[dec.pos])) + " after top-level value")
+	}
+	return err
 }
 
 func compileDecoder(typ reflect.Type) decoder {
