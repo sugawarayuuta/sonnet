@@ -514,16 +514,7 @@ func encodeBool(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
 }
 
 func encodeInterface(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {
-	if val.IsNil() {
-		return append(dst, "null"...), nil
-	}
-	val = val.Elem()
-	fnc, ok := encs.get(val.Type())
-	if !ok {
-		fnc = compileEncoder(val.Type(), true)
-		encs.set(val.Type(), fnc)
-	}
-	return fnc(dst, val, enc)
+	return appendAny(dst, val.Interface(), enc)
 }
 
 func encodeUnsupported(dst []byte, val reflect.Value, enc *Encoder) ([]byte, error) {

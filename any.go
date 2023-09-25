@@ -1,7 +1,28 @@
 package sonnet
 
 import (
+	"reflect"
+	"slices"
 	"strconv"
+	"sync"
+)
+
+type (
+	sorter struct {
+		ents []entry
+	}
+	entry struct {
+		key string
+		elm any
+	}
+)
+
+var (
+	sorters = sync.Pool{
+		New: func() any {
+			return new(sorter)
+		},
+	}
 )
 
 func (dec *Decoder) readAny(head byte) (any, error) {
@@ -170,4 +191,139 @@ func (dec *Decoder) readArrayAny() ([]any, error) {
 			return nil, dec.errSyntax("invalid character " + strconv.QuoteRune(rune(head)) + " after array element")
 		}
 	}
+}
+
+func appendAny(dst []byte, val any, enc *Encoder) ([]byte, error) {
+	switch val := val.(type) {
+	case nil:
+		return append(dst, "null"...), nil
+	case string:
+		return appendString(dst, val, enc.html), nil
+	case float64:
+		return appendFloat(dst, val, 64)
+	case []any:
+		return appendArrayAny(dst, val, enc)
+	case map[string]any:
+		return appendObjectAny(dst, val, enc)
+	}
+	ref := reflect.ValueOf(val)
+	typ := ref.Type()
+	fnc, ok := encs.get(typ)
+	if !ok {
+		fnc = compileEncoder(typ, true)
+		encs.set(typ, fnc)
+	}
+	return fnc(dst, ref, enc)
+}
+
+func appendObjectAny(dst []byte, val map[string]any, enc *Encoder) ([]byte, error) {
+	if val == nil {
+		return append(dst, "null"...), nil
+	}
+	enc.level++
+	if enc.level > maxCycles {
+		ref := reflect.ValueOf(val)
+		if enc.seen == nil {
+			enc.seen = make(map[any]struct{})
+		}
+		head := ref.Pointer()
+		if _, ok := enc.seen[head]; ok {
+			return nil, &UnsupportedValueError{
+				Value: ref,
+				Str:   "encountered a cycle via: " + ref.Type().String(),
+			}
+		}
+		enc.seen[head] = struct{}{}
+		defer delete(enc.seen, head)
+	}
+
+	srt := sorters.Get().(*sorter)
+	if cap(srt.ents) < len(val) {
+		srt.ents = make([]entry, len(val))
+	} else {
+		srt.ents = srt.ents[:len(val)]
+	}
+
+	var idx int
+	for key, elm := range val {
+		ent := &srt.ents[idx]
+		ent.key = key
+		ent.elm = elm
+		idx++
+	}
+	slices.SortFunc(srt.ents, func(fst, sec entry) int {
+		if fst.key < sec.key {
+			return -1
+		}
+		if fst.key > sec.key {
+			return 1
+		}
+		return 0
+	})
+
+	dst = append(dst, '{')
+	var mid bool
+	for _, ent := range srt.ents {
+		if mid {
+			dst = append(dst, ',')
+		}
+		dst = appendString(dst, ent.key, enc.html)
+		dst = append(dst, ':')
+		var err error
+		dst, err = appendAny(dst, ent.elm, enc)
+		if err != nil {
+			return nil, err
+		}
+		mid = true
+	}
+	sorters.Put(srt)
+	enc.level--
+	return append(dst, '}'), nil
+}
+
+func appendArrayAny(dst []byte, val []any, enc *Encoder) ([]byte, error) {
+	if val == nil {
+		return append(dst, "null"...), nil
+	}
+	enc.level++
+	if enc.level > maxCycles {
+		ref := reflect.ValueOf(val)
+		if enc.seen == nil {
+			enc.seen = make(map[any]struct{})
+		}
+		type header struct {
+			ptr uintptr
+			len int
+			cap int
+		}
+		head := header{
+			ptr: ref.Pointer(),
+			len: ref.Len(),
+			cap: ref.Cap(),
+		}
+		if _, ok := enc.seen[head]; ok {
+			return nil, &UnsupportedValueError{
+				Value: ref,
+				Str:   "encountered a cycle via: " + ref.Type().String(),
+			}
+		}
+		enc.seen[head] = struct{}{}
+		defer delete(enc.seen, head)
+	}
+
+	dst = append(dst, '[')
+	var mid bool
+	for idx := 0; idx < len(val); idx++ {
+		if mid {
+			dst = append(dst, ',')
+		}
+		var err error
+		dst, err = appendAny(dst, val[idx], enc)
+		if err != nil {
+			return nil, err
+		}
+		mid = true
+	}
+	enc.level--
+	return append(dst, ']'), nil
 }
