@@ -199,24 +199,80 @@ func (dec *Decoder) eatString() error {
 			break
 		}
 	}
-	var esc bool
-	for {
-		if dec.pos >= len(dec.buf) && !dec.fill() {
-			return dec.errSyntax("string literal not terminated")
-		}
-		char := dec.buf[dec.pos]
+	if dec.pos < len(dec.buf) && dec.buf[dec.pos] == '"' {
 		dec.pos++
-		if esc {
-			esc = false
-		} else if char == '"' {
-			return nil
-		} else if char == '\\' {
-			esc = true
-		}
+		return nil
 	}
+	return dec.eatEscape()
 }
 
-func escape(dst []byte, dec *Decoder) ([]byte, error) {
+func (dec *Decoder) eatEscape() error {
+	const pref = "\\u"
+	var esc bool
+	for dec.pos < len(dec.buf) || dec.fill() {
+		char := dec.buf[dec.pos]
+		if esc {
+			esc = false
+			if rep := replacer[char]; rep != 0 {
+				dec.pos++
+				continue
+			} else if char != 'u' {
+				return dec.errSyntax("invalid escape seqence: \\" + string(char))
+			}
+			dec.pos++
+			if !dec.makeSpace(4) {
+				return dec.errSyntax("not enough space to create Unicode code point")
+			}
+			one, err := dec.hex()
+			if err != nil {
+				return err
+			}
+			dec.pos += 4
+			if utf16.IsSurrogate(one) {
+				if dec.makeSpace(6) && string(dec.buf[dec.pos:dec.pos+len(pref)]) == pref {
+					dec.pos += len(pref)
+					two, err := dec.hex()
+					if err != nil {
+						return err
+					}
+					run := utf16.DecodeRune(one, two)
+					if run != utf8.RuneError {
+						dec.pos += 4
+						continue
+					}
+					dec.pos -= len(pref) // invalid pair, don't consume.
+				}
+			}
+		} else if char == '\\' {
+			esc = true
+			dec.pos++
+		} else if char == '"' {
+			dec.pos++
+			return nil
+		} else if char < ' ' {
+			return dec.errSyntax("invalid control character: " + strconv.Quote(string(char)))
+		} else if char < utf8.RuneSelf {
+			dec.pos++
+		} else {
+			mid := heads[char&^0x80]
+			lo := int(mid & 7)
+			if !dec.makeSpace(lo) || mid == 0xf1 {
+				dec.pos++
+				continue
+			}
+			acc := accepts[mid>>4]
+			runes := dec.buf[dec.pos:]
+			if runes[1]-acc.lo > acc.hi || lo > 2 && (runes[2]|runes[lo-1])>>6 != 2 {
+				dec.pos++
+				continue
+			}
+			dec.pos += lo
+		}
+	}
+	return dec.errSyntax("string literal not terminated")
+}
+
+func (dec *Decoder) readEscape(dst []byte) ([]byte, error) {
 	const pref = "\\u"
 	var esc bool
 	var pos int
@@ -318,7 +374,7 @@ func (dec *Decoder) readString() ([]byte, error) {
 	}
 	dec.sub = append(dec.sub[:0], dec.buf[dec.pos:dec.pos+pos]...)
 	dec.pos += pos
-	dec.sub, err = escape(dec.sub, dec)
+	dec.sub, err = dec.readEscape(dec.sub)
 	if err != nil {
 		return nil, err
 	}
