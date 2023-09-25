@@ -201,6 +201,11 @@ func appendAny(dst []byte, val any, enc *Encoder) ([]byte, error) {
 		return appendString(dst, val, enc.html), nil
 	case float64:
 		return appendFloat(dst, val, 64)
+	case bool:
+		if val {
+			return append(dst, "true"...), nil
+		}
+		return append(dst, "false"...), nil
 	case []any:
 		return appendArrayAny(dst, val, enc)
 	case map[string]any:
