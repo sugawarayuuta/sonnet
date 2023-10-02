@@ -36,12 +36,10 @@ func NonSpace(u64 uint64) int {
 }
 
 func Uint64(u64 uint64) uint64 {
-	const mask = 0x000000ff000000ff
-	const fst = 100 + 1000000<<32
-	const sec = 1 + 10000<<32
-	u64 -= x01 * '0'
-	u64 = u64*10 + u64>>8
-	return (u64&mask*fst + u64>>16&mask*sec) >> 32
+	u64 = u64 & 0x0F0F0F0F0F0F0F0F * 2561 >> 8
+	u64 = u64 & 0x00FF00FF00FF00FF * 6553601 >> 16
+	u64 = u64 & 0x0000FFFF0000FFFF * 42949672960001 >> 32
+	return u64
 }
 
 func CanUint64(u64 uint64) bool {
