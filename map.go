@@ -78,14 +78,14 @@ func compileMapDecoder(typ reflect.Type) decoder {
 		if val.IsNil() {
 			val.Set(reflect.MakeMap(val.Type()))
 		}
-		for {
+		for idx := 0; ; idx++ {
 			dec.eatSpaces()
 			if dec.pos >= len(dec.buf) && !dec.fill() {
 				return dec.errSyntax("unexpected EOF reading a byte")
 			}
 			head = dec.buf[dec.pos]
 			dec.pos++
-			if head == '}' && val.Len() == 0 {
+			if head == '}' && idx == 0 {
 				dec.dep--
 				return nil
 			}

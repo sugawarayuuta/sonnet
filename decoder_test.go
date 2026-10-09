@@ -7,6 +7,7 @@ package sonnet
 import (
 	"bytes"
 	"encoding"
+	stdjson "encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -19,6 +20,92 @@ import (
 	"testing"
 	"time"
 )
+
+func TestUnmarshalReusedMap(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		new   func() any
+	}{
+		{"nil", `{}`, func() any { var v map[string]int; return &v }},
+		{"empty", `{}`, func() any { v := make(map[string]int); return &v }},
+		{"populated", `{}`, func() any { v := map[string]int{"keep": 1}; return &v }},
+		{"whitespace", " { \n\t } ", func() any { v := map[string]int{"keep": 1}; return &v }},
+		{"merge", `{"new":2}`, func() any { v := map[string]int{"keep": 1}; return &v }},
+		{"replace", `{"keep":2}`, func() any { v := map[string]int{"keep": 1}; return &v }},
+		{"null", `null`, func() any { v := map[string]int{"keep": 1}; return &v }},
+		{"integer_keys", `{}`, func() any { v := map[int]string{1: "keep"}; return &v }},
+		{"named_map", `{}`, func() any {
+			type values map[string]int
+			v := values{"keep": 1}
+			return &v
+		}},
+		{"struct_field", `{"Values":{}}`, func() any {
+			return &struct{ Values map[string]int }{map[string]int{"keep": 1}}
+		}},
+		{"pointer", `{}`, func() any { v := map[string]int{"keep": 1}; p := &v; return &p }},
+	}
+	for _, tc := range cases {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
+				got, want := tc.new(), tc.new()
+				var gotErr, wantErr error
+				if stream {
+					gotErr = NewDecoder(strings.NewReader(tc.input)).Decode(got)
+					wantErr = stdjson.NewDecoder(strings.NewReader(tc.input)).Decode(want)
+				} else {
+					gotErr = Unmarshal([]byte(tc.input), got)
+					wantErr = stdjson.Unmarshal([]byte(tc.input), want)
+				}
+				if wantErr != nil {
+					t.Fatalf("standard library: %v", wantErr)
+				}
+				if gotErr != nil {
+					t.Fatalf("decode: %v", gotErr)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("decoded value = %#v, want %#v", reflect.ValueOf(got).Elem().Interface(), reflect.ValueOf(want).Elem().Interface())
+				}
+			})
+		}
+	}
+}
+
+func TestDecodeReusedMapStream(t *testing.T) {
+	v := map[string]int{"keep": 1}
+	dec := NewDecoder(strings.NewReader(`{} {"new":2} {} null {}`))
+	wants := []map[string]int{
+		{"keep": 1},
+		{"keep": 1, "new": 2},
+		{"keep": 1, "new": 2},
+		nil,
+		{},
+	}
+	for idx, want := range wants {
+		if err := dec.Decode(&v); err != nil {
+			t.Fatalf("value %d: %v", idx, err)
+		}
+		if !reflect.DeepEqual(v, want) {
+			t.Fatalf("value %d = %#v, want %#v", idx, v, want)
+		}
+	}
+}
+
+func TestUnmarshalReusedMapInvalidObject(t *testing.T) {
+	for _, input := range []string{`{,}`, `{"new":2,}`, `{"new":2,,"other":3}`, `{{}}`} {
+		for _, populated := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/populated=%t", input, populated), func(t *testing.T) {
+				v := make(map[string]int)
+				if populated {
+					v["keep"] = 1
+				}
+				if err := Unmarshal([]byte(input), &v); err == nil {
+					t.Fatal("invalid object accepted")
+				}
+			})
+		}
+	}
+}
 
 type T struct {
 	X string
